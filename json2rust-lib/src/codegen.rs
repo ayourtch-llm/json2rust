@@ -61,6 +61,7 @@ pub fn generate_rust_types_with_strategy(
                     type_name: format!("Vec<{}>", element_type_name),
                     is_optional: false,
                     serde_rename: None,
+                    serde_flatten: false,
                 }],
                 derives: vec!["Debug".to_string(), "Clone".to_string(), "Serialize".to_string(), "Deserialize".to_string()],
                 is_optional: false,
@@ -164,6 +165,7 @@ fn generate_fields_from_object(
             } else {
                 None
             },
+            serde_flatten: false,
         };
         
         rust_fields.push(rust_field);
@@ -249,6 +251,18 @@ fn extend_with_enum_fields(existing: &ExistingStruct, new_fields: Vec<RustField>
         fields.push(field);
     }
     
+    // Add old-only fields back to main struct as optional (since they're not in new JSON)
+    for field in &classification.old_only_fields {
+        if field.name != "schema_variant" {
+            let mut optional_field = field.clone();
+            if !optional_field.type_name.starts_with("Option<") {
+                optional_field.type_name = format!("Option<{}>", optional_field.type_name);
+                optional_field.is_optional = true;
+            }
+            fields.push(optional_field);
+        }
+    }
+    
     // Check if struct already has a schema_variant field (existing enum)
     if let Some(existing_enum_type) = existing.fields.get("schema_variant") {
         eprintln!("🔍 Found existing schema_variant field of type: {}", existing_enum_type);
@@ -257,32 +271,33 @@ fn extend_with_enum_fields(existing: &ExistingStruct, new_fields: Vec<RustField>
         if let Some(existing_enum) = enums.iter_mut().find(|e| e.name == *existing_enum_type) {
             eprintln!("🔄 Creating extended enum for existing enum: {}", existing_enum.name);
             
-            // Create an extended enum with new variant for the new field combination
+            // Create an extended enum with new variants for new fields only
             let extended_enum = create_extended_enum(&existing.name, &classification.old_only_fields, &classification.new_only_fields, existing_enum);
             
             // Replace the existing enum with the extended one
             *existing_enum = extended_enum;
             
-            // Use the existing enum field
+            // Use the existing enum field with flattening for proper JSON deserialization
             fields.push(RustField {
                 name: "schema_variant".to_string(),
                 type_name: existing_enum_type.clone(),
                 is_optional: false,
                 serde_rename: None,
+                serde_flatten: true,
             });
         } else {
             eprintln!("🔍 Existing enum '{}' not found in enums collection, creating new one", existing_enum_type);
             
-            // Create enum for conflicting field groups if any exist
-            if !classification.old_only_fields.is_empty() || !classification.new_only_fields.is_empty() {
-                let enum_field = create_schema_variant_enum(&existing.name, &classification.old_only_fields, &classification.new_only_fields, enums);
+            // Create enum for new fields only if they exist
+            if !classification.new_only_fields.is_empty() {
+                let enum_field = create_schema_variant_enum(&existing.name, &[], &classification.new_only_fields, enums);
                 fields.push(enum_field);
             }
         }
     } else {
-        // Create enum for conflicting field groups if any exist
-        if !classification.old_only_fields.is_empty() || !classification.new_only_fields.is_empty() {
-            let enum_field = create_schema_variant_enum(&existing.name, &classification.old_only_fields, &classification.new_only_fields, enums);
+        // Create enum for new fields only if they exist
+        if !classification.new_only_fields.is_empty() {
+            let enum_field = create_schema_variant_enum(&existing.name, &[], &classification.new_only_fields, enums);
             fields.push(enum_field);
         }
     }
@@ -349,49 +364,59 @@ fn create_schema_variant_enum(struct_name: &str, old_fields: &[RustField], new_f
             type_name: enum_name,
             is_optional: false,
             serde_rename: None,
+            serde_flatten: false,
         };
     }
     
-    // Create enum variants using distinctive field names
+    // Create enum variants using adaptive strategy
     let mut variants = Vec::new();
     
-    // For untagged enums, we need to order variants from most specific to least specific
-    // New fields variant first (more fields, more specific)
+    // For new enums (no existing variants), use atomic variants for order independence
+    // For existing enums, preserve composite structure but add new fields appropriately
+    
+    // Create atomic variants for new fields only
     if !new_fields.is_empty() {
-        let variant_name = generate_variant_name(new_fields);
-        
-        // Make all fields optional for variant detection
-        let mut optional_new_fields = new_fields.to_vec();
-        for field in &mut optional_new_fields {
-            if !field.type_name.starts_with("Option<") {
-                field.type_name = format!("Option<{}>", field.type_name);
-                field.is_optional = true;
+        for field in new_fields {
+            if field.name != "schema_variant" {
+                let variant_name = generate_variant_name(&[field.clone()]);
+                
+                // Make field optional for variant detection
+                let mut optional_field = field.clone();
+                if !optional_field.type_name.starts_with("Option<") {
+                    optional_field.type_name = format!("Option<{}>", optional_field.type_name);
+                    optional_field.is_optional = true;
+                }
+                
+                variants.push(RustEnumVariant {
+                    name: variant_name,
+                    fields: vec![optional_field],
+                });
             }
         }
-        
-        variants.push(RustEnumVariant {
-            name: variant_name,
-            fields: optional_new_fields,
-        });
     }
     
-    // Old fields variant second (fewer fields, less specific)
+    // Add variant for old-only fields if they exist
     if !old_fields.is_empty() {
         let variant_name = generate_variant_name(old_fields);
         
         // Make all fields optional for variant detection
         let mut optional_old_fields = old_fields.to_vec();
         for field in &mut optional_old_fields {
-            if !field.type_name.starts_with("Option<") {
+            if field.name != "schema_variant" && !field.type_name.starts_with("Option<") {
                 field.type_name = format!("Option<{}>", field.type_name);
                 field.is_optional = true;
             }
         }
         
-        variants.push(RustEnumVariant {
-            name: variant_name,
-            fields: optional_old_fields,
-        });
+        // Filter out schema_variant field
+        optional_old_fields.retain(|f| f.name != "schema_variant");
+        
+        if !optional_old_fields.is_empty() {
+            variants.push(RustEnumVariant {
+                name: variant_name,
+                fields: optional_old_fields,
+            });
+        }
     }
     
     // Create the enum type
@@ -415,6 +440,7 @@ fn create_schema_variant_enum(struct_name: &str, old_fields: &[RustField], new_f
         type_name: enum_name,
         is_optional: false,
         serde_rename: None,
+                serde_flatten: false,
     }
 }
 
@@ -455,6 +481,7 @@ fn extract_fields_from_schema(schema: &JsonSchema) -> Result<Vec<RustField>, Jso
                     } else {
                         None
                     },
+                    serde_flatten: false,
                 };
                 
                 rust_fields.push(rust_field);
@@ -469,65 +496,55 @@ fn extract_fields_from_schema(schema: &JsonSchema) -> Result<Vec<RustField>, Jso
 fn create_extended_enum(_struct_name: &str, old_fields: &[RustField], new_fields: &[RustField], existing_enum: &RustEnum) -> RustEnum {
     let mut variants = existing_enum.variants.clone();
     
-    // Create a new variant for the new field combination
-    if !new_fields.is_empty() || !old_fields.is_empty() {
-        let mut variant_fields = Vec::new();
-        
-        // Add old-only fields (excluding schema_variant to avoid recursion)
-        for field in old_fields {
-            if field.name != "schema_variant" {
-                let mut optional_field = field.clone();
-                if !optional_field.type_name.starts_with("Option<") {
-                    optional_field.type_name = format!("Option<{}>", optional_field.type_name);
-                    optional_field.is_optional = true;
-                }
-                variant_fields.push(optional_field);
-            }
-        }
-        
-        // Add new-only fields (excluding schema_variant to avoid recursion)
-        for field in new_fields {
-            if field.name != "schema_variant" {
-                let mut optional_field = field.clone();
-                if !optional_field.type_name.starts_with("Option<") {
-                    optional_field.type_name = format!("Option<{}>", optional_field.type_name);
-                    optional_field.is_optional = true;
-                }
-                variant_fields.push(optional_field);
-            }
-        }
-        
-        if !variant_fields.is_empty() {
-            // Check if this field combination already exists in any variant
-            let field_names: std::collections::HashSet<String> = variant_fields.iter().map(|f| f.name.clone()).collect();
-            
-            let existing_variant = variants.iter().find(|variant| {
-                let existing_field_names: std::collections::HashSet<String> = variant.fields.iter().map(|f| f.name.clone()).collect();
-                field_names == existing_field_names
+    // Collect all truly new fields that don't exist anywhere in the enum
+    let mut truly_new_fields = Vec::new();
+    for field in new_fields {
+        if field.name != "schema_variant" {
+            // Check if this field already exists in ANY variant
+            let field_exists = variants.iter().any(|variant| {
+                variant.fields.iter().any(|f| f.name == field.name)
             });
             
-            if existing_variant.is_some() {
-                eprintln!("🔄 Field combination already exists in variant: {:?}", existing_variant.unwrap().name);
+            if !field_exists {
+                truly_new_fields.push(field.clone());
+                eprintln!("🔍 Found truly new field: {}", field.name);
             } else {
-                // Generate variant name based on distinctive fields
-                let variant_name = generate_variant_name(&variant_fields);
-                
-                // Additional check by name to avoid duplicates
-                if !variants.iter().any(|v| v.name == variant_name) {
-                    let new_variant = RustEnumVariant {
-                        name: variant_name.clone(),
-                        fields: variant_fields,
-                    };
-                    
-                    variants.push(new_variant);
-                    eprintln!("🆕 Added new variant to enum: {}", variant_name);
-                } else {
-                    eprintln!("🔄 Variant with name '{}' already exists", variant_name);
-                }
+                eprintln!("🔄 Field '{}' already exists in enum variants", field.name);
             }
-        } else {
-            eprintln!("🔍 No fields to create variant from");
         }
+    }
+    
+    // If we have new fields, create a single comprehensive variant that can capture all of them
+    if !truly_new_fields.is_empty() {
+        let variant_name = if truly_new_fields.len() == 1 {
+            generate_variant_name(&truly_new_fields)
+        } else {
+            // For multiple fields, use a name based on the most distinctive field
+            let distinctive_field = truly_new_fields
+                .iter()
+                .min_by_key(|field| field.name.len())
+                .unwrap_or(&truly_new_fields[0]);
+            format!("{}ComboVariant", to_pascal_case(&distinctive_field.name))
+        };
+        
+        // Make all fields optional for variant detection
+        let mut optional_fields = Vec::new();
+        for field in &truly_new_fields {
+            let mut optional_field = field.clone();
+            if !optional_field.type_name.starts_with("Option<") {
+                optional_field.type_name = format!("Option<{}>", optional_field.type_name);
+                optional_field.is_optional = true;
+            }
+            optional_fields.push(optional_field);
+        }
+        
+        let new_variant = RustEnumVariant {
+            name: variant_name.clone(),
+            fields: optional_fields,
+        };
+        
+        variants.push(new_variant);
+        eprintln!("🆕 Added comprehensive variant to enum: {} (with {} fields)", variant_name, truly_new_fields.len());
     }
     
     RustEnum {
@@ -586,6 +603,7 @@ fn classify_fields_for_extension_with_enums(
                 type_name: compatible_type,
                 is_optional: new_field.is_optional || existing_field_type.starts_with("Option<"),
                 serde_rename: new_field.serde_rename.clone(),
+                serde_flatten: false,
             });
         } else {
             // Old-only field - exists only in existing schema
@@ -595,6 +613,7 @@ fn classify_fields_for_extension_with_enums(
                 type_name: existing_field_type.clone(),
                 is_optional: existing_field_type.starts_with("Option<"),
                 serde_rename: None,
+            serde_flatten: false,
             });
         }
     }
@@ -1330,6 +1349,7 @@ fn parse_enum_from_item(item_enum: &syn::ItemEnum) -> Result<RustEnum, Json2Rust
                         type_name: field_type,
                         is_optional,
                         serde_rename,
+                        serde_flatten: false,
                     });
                 }
             }
@@ -1416,6 +1436,10 @@ fn generate_struct_code(rust_struct: &RustStruct) -> Result<String, Json2RustErr
             code.push_str(&format!("    #[serde(rename = \"{}\")]\n", rename));
         }
         
+        if field.serde_flatten {
+            code.push_str("    #[serde(flatten)]\n");
+        }
+        
         if field.is_optional {
             code.push_str(&format!("    #[serde(skip_serializing_if = \"Option::is_none\")]\n"));
         }
@@ -1466,12 +1490,14 @@ mod tests {
                     type_name: "String".to_string(),
                     is_optional: false,
                     serde_rename: None,
+            serde_flatten: false,
                 },
                 RustField {
                     name: "age".to_string(),
                     type_name: "f64".to_string(),
                     is_optional: false,
                     serde_rename: None,
+            serde_flatten: false,
                 },
             ],
             derives: vec!["Debug".to_string(), "Serialize".to_string(), "Deserialize".to_string()],

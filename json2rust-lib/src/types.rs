@@ -53,6 +53,7 @@ pub struct RustField {
     pub type_name: String,
     pub is_optional: bool,
     pub serde_rename: Option<String>,
+    pub serde_flatten: bool,
 }
 
 #[derive(Debug, Clone, PartialEq)]
