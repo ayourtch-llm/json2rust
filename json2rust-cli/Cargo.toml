@@ -1,0 +1,19 @@
+[package]
+name = "json2rust-cli"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "json2rust"
+path = "src/main.rs"
+
+[dependencies]
+json2rust-lib = { path = "../json2rust-lib" }
+clap = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+anyhow = { workspace = true }
+tokio = { version = "1.0", features = ["full"] }
+
+[dev-dependencies]
+tempfile = "3.0"

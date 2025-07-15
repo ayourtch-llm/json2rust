@@ -1,0 +1,286 @@
+use crate::types::*;
+use crate::analyzer::{to_pascal_case, to_snake_case};
+use crate::parser::calculate_struct_similarity;
+use std::collections::HashMap;
+
+const SIMILARITY_THRESHOLD: f64 = 0.7;
+
+pub fn generate_rust_structs(
+    schema: &JsonSchema,
+    existing_structs: &[ExistingStruct],
+) -> Result<Vec<RustStruct>, Json2RustError> {
+    let mut structs = Vec::new();
+    let mut generated_names = HashMap::new();
+    
+    match &schema.json_type {
+        JsonType::Array(element_type) => {
+            let element_type_name = generate_struct_from_schema(
+                &JsonSchema {
+                    name: format!("{}Item", schema.name),
+                    json_type: (**element_type).clone(),
+                    optional: false,
+                },
+                existing_structs,
+                &mut structs,
+                &mut generated_names,
+            )?;
+            
+            let root_struct = RustStruct {
+                name: schema.name.clone(),
+                fields: vec![RustField {
+                    name: "items".to_string(),
+                    type_name: format!("Vec<{}>", element_type_name),
+                    is_optional: false,
+                    serde_rename: None,
+                }],
+                derives: vec!["Debug".to_string(), "Clone".to_string(), "Serialize".to_string(), "Deserialize".to_string()],
+                is_optional: false,
+            };
+            structs.push(root_struct);
+        }
+        _ => {
+            generate_struct_from_schema(schema, existing_structs, &mut structs, &mut generated_names)?;
+        }
+    }
+    
+    Ok(structs)
+}
+
+fn generate_struct_from_schema(
+    schema: &JsonSchema,
+    existing_structs: &[ExistingStruct],
+    structs: &mut Vec<RustStruct>,
+    generated_names: &mut HashMap<String, usize>,
+) -> Result<String, Json2RustError> {
+    match &schema.json_type {
+        JsonType::Object(fields) => {
+            let struct_name = ensure_unique_name(&schema.name, generated_names);
+            let rust_fields = generate_fields_from_object(
+                fields,
+                existing_structs,
+                structs,
+                generated_names,
+            )?;
+            
+            let rust_struct = if let Some(existing) = find_compatible_struct(&rust_fields, existing_structs) {
+                extend_existing_struct(existing, rust_fields)
+            } else {
+                RustStruct {
+                    name: struct_name.clone(),
+                    fields: rust_fields,
+                    derives: vec!["Debug".to_string(), "Clone".to_string(), "Serialize".to_string(), "Deserialize".to_string()],
+                    is_optional: schema.optional,
+                }
+            };
+            
+            structs.push(rust_struct);
+            Ok(struct_name)
+        }
+        JsonType::Array(element_type) => {
+            let element_type_name = generate_struct_from_schema(
+                &JsonSchema {
+                    name: format!("{}Item", schema.name),
+                    json_type: (**element_type).clone(),
+                    optional: false,
+                },
+                existing_structs,
+                structs,
+                generated_names,
+            )?;
+            Ok(format!("Vec<{}>", element_type_name))
+        }
+        JsonType::String => Ok("String".to_string()),
+        JsonType::Number => Ok("f64".to_string()),
+        JsonType::Boolean => Ok("bool".to_string()),
+        JsonType::Null => Ok("Option<serde_json::Value>".to_string()),
+    }
+}
+
+fn generate_fields_from_object(
+    fields: &HashMap<String, JsonType>,
+    existing_structs: &[ExistingStruct],
+    structs: &mut Vec<RustStruct>,
+    generated_names: &mut HashMap<String, usize>,
+) -> Result<Vec<RustField>, Json2RustError> {
+    let mut rust_fields = Vec::new();
+    
+    for (field_name, field_type) in fields {
+        let field_type_name = generate_struct_from_schema(
+            &JsonSchema {
+                name: to_pascal_case(field_name),
+                json_type: field_type.clone(),
+                optional: false,
+            },
+            existing_structs,
+            structs,
+            generated_names,
+        )?;
+        
+        let rust_field = RustField {
+            name: to_snake_case(field_name),
+            type_name: field_type_name,
+            is_optional: matches!(field_type, JsonType::Null),
+            serde_rename: if to_snake_case(field_name) != *field_name {
+                Some(field_name.clone())
+            } else {
+                None
+            },
+        };
+        
+        rust_fields.push(rust_field);
+    }
+    
+    Ok(rust_fields)
+}
+
+fn find_compatible_struct<'a>(
+    new_fields: &[RustField],
+    existing_structs: &'a [ExistingStruct],
+) -> Option<&'a ExistingStruct> {
+    let new_field_map: HashMap<String, String> = new_fields
+        .iter()
+        .map(|f| (f.name.clone(), f.type_name.clone()))
+        .collect();
+    
+    existing_structs
+        .iter()
+        .find(|existing| {
+            calculate_struct_similarity(existing, &new_field_map) >= SIMILARITY_THRESHOLD
+        })
+}
+
+fn extend_existing_struct(existing: &ExistingStruct, new_fields: Vec<RustField>) -> RustStruct {
+    let mut fields = new_fields;
+    
+    for (existing_field_name, existing_field_type) in &existing.fields {
+        if !fields.iter().any(|f| f.name == *existing_field_name) {
+            fields.push(RustField {
+                name: existing_field_name.clone(),
+                type_name: format!("Option<{}>", existing_field_type),
+                is_optional: true,
+                serde_rename: None,
+            });
+        }
+    }
+    
+    RustStruct {
+        name: existing.name.clone(),
+        fields,
+        derives: vec!["Debug".to_string(), "Clone".to_string(), "Serialize".to_string(), "Deserialize".to_string()],
+        is_optional: false,
+    }
+}
+
+fn ensure_unique_name(base_name: &str, generated_names: &mut HashMap<String, usize>) -> String {
+    let count = generated_names.entry(base_name.to_string()).or_insert(0);
+    *count += 1;
+    
+    if *count == 1 {
+        base_name.to_string()
+    } else {
+        format!("{}{}", base_name, count)
+    }
+}
+
+pub fn generate_code(structs: &[RustStruct]) -> Result<String, Json2RustError> {
+    let mut code = String::new();
+    
+    code.push_str("use serde::{Deserialize, Serialize};\n\n");
+    
+    for rust_struct in structs {
+        code.push_str(&generate_struct_code(rust_struct)?);
+        code.push('\n');
+    }
+    
+    Ok(code)
+}
+
+fn generate_struct_code(rust_struct: &RustStruct) -> Result<String, Json2RustError> {
+    let mut code = String::new();
+    
+    let derives = rust_struct.derives.join(", ");
+    code.push_str(&format!("#[derive({})]\n", derives));
+    code.push_str(&format!("pub struct {} {{\n", rust_struct.name));
+    
+    for field in &rust_struct.fields {
+        if let Some(rename) = &field.serde_rename {
+            code.push_str(&format!("    #[serde(rename = \"{}\")]\n", rename));
+        }
+        
+        if field.is_optional {
+            code.push_str(&format!("    #[serde(skip_serializing_if = \"Option::is_none\")]\n"));
+        }
+        
+        let field_type = if field.is_optional && !field.type_name.starts_with("Option<") {
+            format!("Option<{}>", field.type_name)
+        } else {
+            field.type_name.clone()
+        };
+        
+        code.push_str(&format!("    pub {}: {},\n", field.name, field_type));
+    }
+    
+    code.push_str("}\n");
+    
+    Ok(code)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_generate_simple_struct() {
+        let mut fields = HashMap::new();
+        fields.insert("name".to_string(), JsonType::String);
+        fields.insert("age".to_string(), JsonType::Number);
+        
+        let schema = JsonSchema {
+            name: "Person".to_string(),
+            json_type: JsonType::Object(fields),
+            optional: false,
+        };
+        
+        let structs = generate_rust_structs(&schema, &[]).unwrap();
+        assert_eq!(structs.len(), 1);
+        assert_eq!(structs[0].name, "Person");
+        assert_eq!(structs[0].fields.len(), 2);
+    }
+
+    #[test]
+    fn test_generate_code() {
+        let rust_struct = RustStruct {
+            name: "Person".to_string(),
+            fields: vec![
+                RustField {
+                    name: "name".to_string(),
+                    type_name: "String".to_string(),
+                    is_optional: false,
+                    serde_rename: None,
+                },
+                RustField {
+                    name: "age".to_string(),
+                    type_name: "f64".to_string(),
+                    is_optional: false,
+                    serde_rename: None,
+                },
+            ],
+            derives: vec!["Debug".to_string(), "Serialize".to_string(), "Deserialize".to_string()],
+            is_optional: false,
+        };
+        
+        let code = generate_code(&[rust_struct]).unwrap();
+        assert!(code.contains("pub struct Person"));
+        assert!(code.contains("pub name: String"));
+        assert!(code.contains("pub age: f64"));
+    }
+
+    #[test]
+    fn test_ensure_unique_name() {
+        let mut generated_names = HashMap::new();
+        
+        assert_eq!(ensure_unique_name("Person", &mut generated_names), "Person");
+        assert_eq!(ensure_unique_name("Person", &mut generated_names), "Person2");
+        assert_eq!(ensure_unique_name("Person", &mut generated_names), "Person3");
+    }
+}
