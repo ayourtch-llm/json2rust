@@ -1,0 +1,25 @@
+[package]
+name = "json2rust-web"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+json2rust-lib = { path = "../json2rust-lib" }
+wasm-bindgen = { workspace = true }
+js-sys = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+
+[dependencies.web-sys]
+version = "0.3"
+features = [
+  "console",
+  "Document",
+  "Element",
+  "HtmlElement",
+  "HtmlTextAreaElement",
+  "Window",
+]
