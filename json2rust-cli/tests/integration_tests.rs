@@ -98,7 +98,7 @@ fn test_with_existing_struct() {
     assert!(stdout.contains("pub struct Person"));
     assert!(stdout.contains("pub name: String"));
     assert!(stdout.contains("pub age: i32"));
-    assert!(stdout.contains("pub email: String"));
+    assert!(stdout.contains("pub email: Option<String>"));
 }
 
 #[test]

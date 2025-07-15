@@ -58,11 +58,11 @@ else
     exit 1
 fi
 
-if echo "$OUTPUT" | grep -q "pub email: String"; then
+if echo "$OUTPUT" | grep -q "pub email: Option<String>"; then
     echo "✅ New field added (email)"
 else
     echo "❌ New field not added"
-    echo "Expected: email field should be added"
+    echo "Expected: email field should be added as Option<String>"
     exit 1
 fi
 

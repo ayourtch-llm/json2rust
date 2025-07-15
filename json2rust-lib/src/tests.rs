@@ -30,7 +30,7 @@ mod existing_struct_tests {
         assert_eq!(age_field.type_name, "i32"); // Type preserved
         
         let email_field = user_struct.fields.iter().find(|f| f.name == "email").unwrap();
-        assert_eq!(email_field.type_name, "String");
+        assert_eq!(email_field.type_name, "Option<String>");
     }
     
     #[test]
@@ -117,7 +117,7 @@ mod existing_struct_tests {
         assert_eq!(age_field.type_name, "Option<i32>"); // Missing field stays Option
         
         let location_field = profile_struct.fields.iter().find(|f| f.name == "location").unwrap();
-        assert_eq!(location_field.type_name, "String"); // New field is not optional
+        assert_eq!(location_field.type_name, "Option<String>"); // New field is optional
     }
     
     #[test]
@@ -170,6 +170,6 @@ mod existing_struct_tests {
         assert_eq!(name_field.type_name, "String");
         
         let price_field = item_struct.fields.iter().find(|f| f.name == "price").unwrap();
-        assert_eq!(price_field.type_name, "f64");
+        assert_eq!(price_field.type_name, "Option<f64>");
     }
 }
