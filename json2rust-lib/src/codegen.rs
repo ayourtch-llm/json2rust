@@ -295,7 +295,7 @@ fn generate_code_preserving_original(
     new_structs: &[RustStruct],
     original_code: &str,
 ) -> Result<String, Json2RustError> {
-    use syn::{File, Item};
+    use syn::{File, Item, spanned::Spanned};
     
     let ast: File = syn::parse_str(original_code)
         .map_err(|e| Json2RustError::RustParsing(format!("Failed to parse original code: {}", e)))?;
@@ -307,69 +307,136 @@ fn generate_code_preserving_original(
         .collect();
     
     let mut result = String::new();
+    let mut last_end = 0;
     
-    // Extract imports and other non-struct items first
-    let mut imports = Vec::new();
-    let mut other_items = Vec::new();
-    let mut original_structs = Vec::new();
+    // Find struct spans and sort them by position
+    let mut struct_replacements = Vec::new();
     
     for item in &ast.items {
-        match item {
-            Item::Use(_) => imports.push(item),
-            Item::Struct(item_struct) => {
-                let struct_name = item_struct.ident.to_string();
-                if new_struct_map.contains_key(&struct_name) {
-                    // This struct will be replaced
-                    eprintln!("🔄 Replaced struct '{}' with extended version", struct_name);
-                } else {
-                    // This struct will be preserved
-                    original_structs.push(item_struct);
-                }
+        if let Item::Struct(item_struct) = item {
+            let struct_name = item_struct.ident.to_string();
+            if let Some(new_struct) = new_struct_map.get(&struct_name) {
+                // When user explicitly specifies a struct name, we should extend it regardless of similarity
+                // The similarity threshold only applies for automatic struct detection
+                eprintln!("🎯 Explicitly extending struct '{}' as requested by user", struct_name);
+                let _span = item_struct.span();
+                
+                // Parse the existing struct to get its fields
+                let existing_struct = parse_struct_from_item(item_struct)?;
+                
+                // Extend the existing struct with new fields from JSON
+                let extended_struct = extend_existing_struct(&existing_struct, new_struct.fields.clone());
+                
+                // For proc_macro2::Span, we need to use a different approach
+                // Let's find the struct boundaries by searching for the struct name
+                let start_byte = find_struct_start(original_code, &struct_name)?;
+                let end_byte = find_struct_end(original_code, start_byte)?;
+                
+                struct_replacements.push(StructReplacement {
+                    start: start_byte,
+                    end: end_byte,
+                    new_struct: extended_struct,
+                    name: struct_name.clone(),
+                });
+                
+                eprintln!("🔄 Will replace struct '{}' with extended version", struct_name);
             }
-            _ => other_items.push(item),
         }
     }
     
-    // Generate the result by preserving structure
-    for import in &imports {
-        result.push_str(&quote::quote!(#import).to_string());
-        result.push('\n');
+    // Sort replacements by start position
+    struct_replacements.sort_by_key(|r| r.start);
+    
+    // Process the file, preserving original text and replacing specific structs
+    for replacement in struct_replacements {
+        // Add original text up to this struct
+        result.push_str(&original_code[last_end..replacement.start]);
+        
+        // Add the new struct code
+        result.push_str(&generate_struct_code(&replacement.new_struct)?);
+        
+        last_end = replacement.end;
     }
     
-    if !imports.is_empty() {
-        result.push('\n');
-    }
-    
-    // Add preserved structs
-    for original_struct in &original_structs {
-        result.push_str(&quote::quote!(#original_struct).to_string());
-        result.push('\n');
-    }
-    
-    // Add replaced structs
-    for new_struct in new_structs {
-        if struct_exists_in_original(&ast, &new_struct.name) {
-            result.push_str(&generate_struct_code(new_struct)?);
-            result.push('\n');
-        }
-    }
-    
-    // Add other items
-    for item in &other_items {
-        result.push_str(&quote::quote!(#item).to_string());
-        result.push('\n');
-    }
+    // Add remaining original text
+    result.push_str(&original_code[last_end..]);
     
     // Add completely new structs that weren't in the original file
     for new_struct in new_structs {
         if !struct_exists_in_original(&ast, &new_struct.name) {
-            result.push_str(&generate_struct_code(new_struct)?);
             result.push('\n');
+            result.push_str(&generate_struct_code(new_struct)?);
             eprintln!("✨ Added new struct '{}'", new_struct.name);
         }
     }
     
     Ok(result)
+}
+
+struct StructReplacement {
+    start: usize,
+    end: usize,
+    new_struct: RustStruct,
+    #[allow(dead_code)]
+    name: String,
+}
+
+fn find_struct_start(source: &str, struct_name: &str) -> Result<usize, Json2RustError> {
+    // Simple approach: look for the start of the struct definition including derives
+    let lines: Vec<&str> = source.lines().collect();
+    let mut struct_line_idx = None;
+    
+    // Find the line with the struct definition
+    for (i, line) in lines.iter().enumerate() {
+        if line.trim().contains(&format!("struct {}", struct_name)) {
+            struct_line_idx = Some(i);
+            break;
+        }
+    }
+    
+    if let Some(struct_idx) = struct_line_idx {
+        // Look backwards for derive attributes
+        let mut start_idx = struct_idx;
+        
+        while start_idx > 0 {
+            let prev_line = lines[start_idx - 1].trim();
+            if prev_line.starts_with("#[derive(") || prev_line.starts_with("pub ") || prev_line.starts_with("//") || prev_line.is_empty() {
+                start_idx -= 1;
+            } else {
+                break;
+            }
+        }
+        
+        // Calculate byte position
+        let byte_pos = lines[..start_idx].iter().map(|l| l.len() + 1).sum::<usize>();
+        Ok(byte_pos)
+    } else {
+        Err(Json2RustError::CodeGeneration(format!("Could not find struct {} in source", struct_name)))
+    }
+}
+
+fn find_struct_end(source: &str, start: usize) -> Result<usize, Json2RustError> {
+    let remaining = &source[start..];
+    let mut brace_count = 0;
+    let mut in_struct = false;
+    
+    for (i, ch) in remaining.char_indices() {
+        match ch {
+            '{' => {
+                brace_count += 1;
+                in_struct = true;
+            }
+            '}' => {
+                brace_count -= 1;
+                if in_struct && brace_count == 0 {
+                    return Ok(start + i + 1);
+                }
+            }
+            _ => {}
+        }
+    }
+    
+    Err(Json2RustError::CodeGeneration("Could not find end of struct".to_string()))
 }
 
 fn struct_exists_in_original(ast: &syn::File, name: &str) -> bool {
@@ -380,6 +447,59 @@ fn struct_exists_in_original(ast: &syn::File, name: &str) -> bool {
             false
         }
     })
+}
+
+fn parse_struct_from_item(item_struct: &syn::ItemStruct) -> Result<ExistingStruct, Json2RustError> {
+    let mut fields = HashMap::new();
+    
+    if let syn::Fields::Named(named_fields) = &item_struct.fields {
+        for field in &named_fields.named {
+            if let Some(field_name) = &field.ident {
+                let field_type = type_to_string(&field.ty);
+                fields.insert(field_name.to_string(), field_type);
+            }
+        }
+    }
+    
+    Ok(ExistingStruct {
+        name: item_struct.ident.to_string(),
+        fields,
+    })
+}
+
+fn type_to_string(ty: &syn::Type) -> String {
+    match ty {
+        syn::Type::Path(type_path) => {
+            if let Some(segment) = type_path.path.segments.last() {
+                match &segment.arguments {
+                    syn::PathArguments::None => segment.ident.to_string(),
+                    syn::PathArguments::AngleBracketed(args) => {
+                        let inner_types: Vec<String> = args
+                            .args
+                            .iter()
+                            .filter_map(|arg| {
+                                if let syn::GenericArgument::Type(inner_ty) = arg {
+                                    Some(type_to_string(inner_ty))
+                                } else {
+                                    None
+                                }
+                            })
+                            .collect();
+                        
+                        if inner_types.is_empty() {
+                            segment.ident.to_string()
+                        } else {
+                            format!("{}<{}>", segment.ident, inner_types.join(", "))
+                        }
+                    }
+                    _ => segment.ident.to_string(),
+                }
+            } else {
+                "Unknown".to_string()
+            }
+        }
+        _ => "Unknown".to_string(),
+    }
 }
 
 
