@@ -9,7 +9,8 @@ pub fn generate_rust_structs(
     schema: &JsonSchema,
     existing_structs: &[ExistingStruct],
 ) -> Result<Vec<RustStruct>, Json2RustError> {
-    generate_rust_structs_with_strategy(schema, existing_structs, &MergeStrategy::Optional)
+    let result = generate_rust_types_with_strategy(schema, existing_structs, &MergeStrategy::Optional)?;
+    Ok(result.structs)
 }
 
 pub fn generate_rust_structs_with_strategy(
@@ -17,7 +18,23 @@ pub fn generate_rust_structs_with_strategy(
     existing_structs: &[ExistingStruct],
     merge_strategy: &MergeStrategy,
 ) -> Result<Vec<RustStruct>, Json2RustError> {
+    let result = generate_rust_types_with_strategy(schema, existing_structs, merge_strategy)?;
+    Ok(result.structs)
+}
+
+#[derive(Debug, Clone)]
+pub struct GeneratedTypes {
+    pub structs: Vec<RustStruct>,
+    pub enums: Vec<RustEnum>,
+}
+
+pub fn generate_rust_types_with_strategy(
+    schema: &JsonSchema,
+    existing_structs: &[ExistingStruct],
+    merge_strategy: &MergeStrategy,
+) -> Result<GeneratedTypes, Json2RustError> {
     let mut structs = Vec::new();
+    let mut enums = Vec::new();
     let mut generated_names = HashMap::new();
     
     match &schema.json_type {
@@ -32,6 +49,7 @@ pub fn generate_rust_structs_with_strategy(
                 },
                 existing_structs,
                 &mut structs,
+                &mut enums,
                 &mut generated_names,
                 merge_strategy,
             )?;
@@ -50,17 +68,18 @@ pub fn generate_rust_structs_with_strategy(
             structs.push(root_struct);
         }
         _ => {
-            generate_struct_from_schema(schema, existing_structs, &mut structs, &mut generated_names, merge_strategy)?;
+            generate_struct_from_schema(schema, existing_structs, &mut structs, &mut enums, &mut generated_names, merge_strategy)?;
         }
     }
     
-    Ok(structs)
+    Ok(GeneratedTypes { structs, enums })
 }
 
 fn generate_struct_from_schema(
     schema: &JsonSchema,
     existing_structs: &[ExistingStruct],
     structs: &mut Vec<RustStruct>,
+    enums: &mut Vec<RustEnum>,
     generated_names: &mut HashMap<String, usize>,
     merge_strategy: &MergeStrategy,
 ) -> Result<String, Json2RustError> {
@@ -71,12 +90,13 @@ fn generate_struct_from_schema(
                 fields,
                 existing_structs,
                 structs,
+                enums,
                 generated_names,
                 merge_strategy,
             )?;
             
             let rust_struct = if let Some(existing) = find_compatible_struct(&rust_fields, existing_structs) {
-                extend_existing_struct(existing, rust_fields, merge_strategy)
+                extend_existing_struct(existing, rust_fields, enums, merge_strategy)
             } else {
                 RustStruct {
                     name: struct_name.clone(),
@@ -98,6 +118,7 @@ fn generate_struct_from_schema(
                 },
                 existing_structs,
                 structs,
+                enums,
                 generated_names,
                 merge_strategy,
             )?;
@@ -114,6 +135,7 @@ fn generate_fields_from_object(
     fields: &HashMap<String, JsonType>,
     existing_structs: &[ExistingStruct],
     structs: &mut Vec<RustStruct>,
+    enums: &mut Vec<RustEnum>,
     generated_names: &mut HashMap<String, usize>,
     merge_strategy: &MergeStrategy,
 ) -> Result<Vec<RustField>, Json2RustError> {
@@ -128,6 +150,7 @@ fn generate_fields_from_object(
             },
             existing_structs,
             structs,
+            enums,
             generated_names,
             merge_strategy,
         )?;
@@ -165,14 +188,14 @@ fn find_compatible_struct<'a>(
         })
 }
 
-fn extend_existing_struct(existing: &ExistingStruct, new_fields: Vec<RustField>, merge_strategy: &MergeStrategy) -> RustStruct {
+fn extend_existing_struct(existing: &ExistingStruct, new_fields: Vec<RustField>, enums: &mut Vec<RustEnum>, merge_strategy: &MergeStrategy) -> RustStruct {
     // Order-independent field classification
     let classification = classify_fields_for_extension(existing, &new_fields);
     
     match merge_strategy {
         MergeStrategy::Optional => extend_with_optional_fields(existing, classification),
-        MergeStrategy::Enum => extend_with_enum_fields(existing, classification),
-        MergeStrategy::Hybrid => extend_with_hybrid_fields(existing, classification),
+        MergeStrategy::Enum => extend_with_enum_fields(existing, classification, enums),
+        MergeStrategy::Hybrid => extend_with_hybrid_fields(existing, classification, enums),
     }
 }
 
@@ -210,7 +233,7 @@ fn extend_with_optional_fields(existing: &ExistingStruct, classification: FieldC
     }
 }
 
-fn extend_with_enum_fields(existing: &ExistingStruct, classification: FieldClassification) -> RustStruct {
+fn extend_with_enum_fields(existing: &ExistingStruct, classification: FieldClassification, enums: &mut Vec<RustEnum>) -> RustStruct {
     let mut fields = Vec::new();
     
     // Add common fields first (mandatory with compatible types)
@@ -220,7 +243,7 @@ fn extend_with_enum_fields(existing: &ExistingStruct, classification: FieldClass
     
     // Create enum for conflicting field groups if any exist
     if !classification.old_only_fields.is_empty() || !classification.new_only_fields.is_empty() {
-        let enum_field = create_schema_variant_enum(&existing.name, &classification.old_only_fields, &classification.new_only_fields);
+        let enum_field = create_schema_variant_enum(&existing.name, &classification.old_only_fields, &classification.new_only_fields, enums);
         fields.push(enum_field);
     }
     
@@ -232,7 +255,7 @@ fn extend_with_enum_fields(existing: &ExistingStruct, classification: FieldClass
     }
 }
 
-fn extend_with_hybrid_fields(existing: &ExistingStruct, classification: FieldClassification) -> RustStruct {
+fn extend_with_hybrid_fields(existing: &ExistingStruct, classification: FieldClassification, enums: &mut Vec<RustEnum>) -> RustStruct {
     let mut fields = Vec::new();
     
     // Add common fields first (mandatory with compatible types)
@@ -247,7 +270,7 @@ fn extend_with_hybrid_fields(existing: &ExistingStruct, classification: FieldCla
     
     if total_conflicting > 3 {
         // Use enum for large field groups
-        let enum_field = create_schema_variant_enum(&existing.name, &classification.old_only_fields, &classification.new_only_fields);
+        let enum_field = create_schema_variant_enum(&existing.name, &classification.old_only_fields, &classification.new_only_fields, enums);
         fields.push(enum_field);
     } else {
         // Use optional for small field groups
@@ -276,12 +299,64 @@ fn extend_with_hybrid_fields(existing: &ExistingStruct, classification: FieldCla
     }
 }
 
-fn create_schema_variant_enum(struct_name: &str, _old_fields: &[RustField], _new_fields: &[RustField]) -> RustField {
+fn create_schema_variant_enum(struct_name: &str, old_fields: &[RustField], new_fields: &[RustField], enums: &mut Vec<RustEnum>) -> RustField {
     // Create enum type name
     let enum_name = format!("{}Variant", struct_name);
     
-    // For now, create a simple enum field
-    // In a full implementation, we'd generate the actual enum type
+    // Create enum variants
+    let mut variants = Vec::new();
+    
+    // For untagged enums, we need to order variants from most specific to least specific
+    // Current variant first (more fields, more specific)
+    if !new_fields.is_empty() {
+        // Make all fields optional for variant detection
+        let mut optional_new_fields = new_fields.to_vec();
+        for field in &mut optional_new_fields {
+            if !field.type_name.starts_with("Option<") {
+                field.type_name = format!("Option<{}>", field.type_name);
+                field.is_optional = true;
+            }
+        }
+        
+        variants.push(RustEnumVariant {
+            name: "Current".to_string(),
+            fields: optional_new_fields,
+        });
+    }
+    
+    // Legacy variant second (fewer fields, less specific)
+    if !old_fields.is_empty() {
+        // Make all fields optional for variant detection
+        let mut optional_old_fields = old_fields.to_vec();
+        for field in &mut optional_old_fields {
+            if !field.type_name.starts_with("Option<") {
+                field.type_name = format!("Option<{}>", field.type_name);
+                field.is_optional = true;
+            }
+        }
+        
+        variants.push(RustEnumVariant {
+            name: "Legacy".to_string(),
+            fields: optional_old_fields,
+        });
+    }
+    
+    // Create the enum type
+    let rust_enum = RustEnum {
+        name: enum_name.clone(),
+        variants,
+        derives: vec![
+            "Debug".to_string(),
+            "Clone".to_string(),
+            "Serialize".to_string(),
+            "Deserialize".to_string(),
+        ],
+    };
+    
+    // Add enum to the collection
+    enums.push(rust_enum);
+    
+    // Return the field that references this enum
     RustField {
         name: "schema_variant".to_string(),
         type_name: enum_name,
@@ -417,14 +492,66 @@ fn ensure_unique_name(base_name: &str, generated_names: &mut HashMap<String, usi
 }
 
 pub fn generate_code(structs: &[RustStruct]) -> Result<String, Json2RustError> {
+    generate_code_with_types(&GeneratedTypes { structs: structs.to_vec(), enums: Vec::new() })
+}
+
+pub fn generate_code_with_types(types: &GeneratedTypes) -> Result<String, Json2RustError> {
     let mut code = String::new();
     
     code.push_str("use serde::{Deserialize, Serialize};\n\n");
     
-    for rust_struct in structs {
+    // Generate enums first
+    for rust_enum in &types.enums {
+        code.push_str(&generate_enum_code(rust_enum)?);
+        code.push('\n');
+    }
+    
+    // Generate structs
+    for rust_struct in &types.structs {
         code.push_str(&generate_struct_code(rust_struct)?);
         code.push('\n');
     }
+    
+    Ok(code)
+}
+
+fn generate_enum_code(rust_enum: &RustEnum) -> Result<String, Json2RustError> {
+    let mut code = String::new();
+    
+    let derives = rust_enum.derives.join(", ");
+    code.push_str(&format!("#[derive({})]\n", derives));
+    
+    // Use untagged serialization for field-based variant detection
+    code.push_str(&format!("#[serde(untagged)]\n"));
+    code.push_str(&format!("pub enum {} {{\n", rust_enum.name));
+    
+    for variant in &rust_enum.variants {
+        if variant.fields.is_empty() {
+            code.push_str(&format!("    {},\n", variant.name));
+        } else {
+            code.push_str(&format!("    {} {{\n", variant.name));
+            for field in &variant.fields {
+                if let Some(rename) = &field.serde_rename {
+                    code.push_str(&format!("        #[serde(rename = \"{}\")]\n", rename));
+                }
+                
+                if field.is_optional {
+                    code.push_str(&format!("        #[serde(skip_serializing_if = \"Option::is_none\")]\n"));
+                }
+                
+                let field_type = if field.is_optional && !field.type_name.starts_with("Option<") {
+                    format!("Option<{}>", field.type_name)
+                } else {
+                    field.type_name.clone()
+                };
+                
+                code.push_str(&format!("        {}: {},\n", field.name, field_type));
+            }
+            code.push_str("    },\n");
+        }
+    }
+    
+    code.push_str("}\n");
     
     Ok(code)
 }
@@ -441,10 +568,19 @@ pub fn generate_code_with_preservation_and_strategy(
     original_code: Option<&str>,
     merge_strategy: &MergeStrategy,
 ) -> Result<String, Json2RustError> {
+    let types = GeneratedTypes { structs: structs.to_vec(), enums: Vec::new() };
+    generate_code_with_types_and_preservation(&types, original_code, merge_strategy)
+}
+
+pub fn generate_code_with_types_and_preservation(
+    types: &GeneratedTypes,
+    original_code: Option<&str>,
+    merge_strategy: &MergeStrategy,
+) -> Result<String, Json2RustError> {
     if let Some(original) = original_code {
-        generate_code_preserving_original(structs, original, merge_strategy)
+        generate_code_preserving_original(&types.structs, original, merge_strategy)
     } else {
-        generate_code(structs)
+        generate_code_with_types(types)
     }
 }
 
@@ -453,6 +589,8 @@ fn generate_code_preserving_original(
     original_code: &str,
     merge_strategy: &MergeStrategy,
 ) -> Result<String, Json2RustError> {
+    // For preservation, we need to create a mutable enum collection for potential enum generation
+    let mut temp_enums = Vec::new();
     use syn::{File, Item, spanned::Spanned};
     
     let ast: File = syn::parse_str(original_code)
@@ -483,7 +621,7 @@ fn generate_code_preserving_original(
                 let existing_struct = parse_struct_from_item(item_struct)?;
                 
                 // Extend the existing struct with new fields from JSON
-                let extended_struct = extend_existing_struct(&existing_struct, new_struct.fields.clone(), merge_strategy);
+                let extended_struct = extend_existing_struct(&existing_struct, new_struct.fields.clone(), &mut temp_enums, merge_strategy);
                 
                 // For proc_macro2::Span, we need to use a different approach
                 // Let's find the struct boundaries by searching for the struct name
@@ -526,6 +664,13 @@ fn generate_code_preserving_original(
             result.push_str(&generate_struct_code(new_struct)?);
             eprintln!("✨ Added new struct '{}'", new_struct.name);
         }
+    }
+    
+    // Add any generated enums
+    for rust_enum in &temp_enums {
+        result.push('\n');
+        result.push_str(&generate_enum_code(rust_enum)?);
+        eprintln!("✨ Added new enum '{}'", rust_enum.name);
     }
     
     Ok(result)

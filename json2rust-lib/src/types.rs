@@ -29,6 +29,25 @@ pub struct RustStruct {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct RustEnum {
+    pub name: String,
+    pub variants: Vec<RustEnumVariant>,
+    pub derives: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct RustEnumVariant {
+    pub name: String,
+    pub fields: Vec<RustField>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub enum RustType {
+    Struct(RustStruct),
+    Enum(RustEnum),
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct RustField {
     pub name: String,
     pub type_name: String,

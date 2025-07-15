@@ -72,8 +72,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let merge_strategy = matches.get_one::<String>("merge-strategy").unwrap().as_str().into();
     
     let json_schema = analyze_json(&input_json, struct_name)?;
-    let rust_structs = generate_rust_structs_with_strategy(&json_schema, &existing_structs, &merge_strategy)?;
-    let generated_code = generate_code_with_preservation_and_strategy(&rust_structs, existing_code.as_deref(), &merge_strategy)?;
+    let generated_types = generate_rust_types_with_strategy(&json_schema, &existing_structs, &merge_strategy)?;
+    let generated_code = generate_code_with_types_and_preservation(&generated_types, existing_code.as_deref(), &merge_strategy)?;
 
     if let Some(output_file) = matches.get_one::<String>("output") {
         fs::write(output_file, generated_code)?;
