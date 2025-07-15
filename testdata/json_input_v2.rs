@@ -1,0 +1,1 @@
+{"name": "John Doe", "age": 30, "email": "john@example.com", "active": true, "premium": true, "last_login": "2023-01-01"}

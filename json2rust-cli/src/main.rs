@@ -41,6 +41,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .help("Name for the root struct")
                 .default_value("RootStruct"),
         )
+        .arg(
+            Arg::new("merge-strategy")
+                .short('s')
+                .long("merge-strategy")
+                .value_name("STRATEGY")
+                .help("Strategy for merging incompatible schemas")
+                .value_parser(["optional", "enum", "hybrid"])
+                .default_value("optional"),
+        )
         .get_matches();
 
     let input_json = if let Some(input_file) = matches.get_one::<String>("input") {
@@ -60,10 +69,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     };
 
     let struct_name = matches.get_one::<String>("struct-name").unwrap();
+    let merge_strategy = matches.get_one::<String>("merge-strategy").unwrap().as_str().into();
     
     let json_schema = analyze_json(&input_json, struct_name)?;
-    let rust_structs = generate_rust_structs(&json_schema, &existing_structs)?;
-    let generated_code = generate_code_with_preservation(&rust_structs, existing_code.as_deref())?;
+    let rust_structs = generate_rust_structs_with_strategy(&json_schema, &existing_structs, &merge_strategy)?;
+    let generated_code = generate_code_with_preservation_and_strategy(&rust_structs, existing_code.as_deref(), &merge_strategy)?;
 
     if let Some(output_file) = matches.get_one::<String>("output") {
         fs::write(output_file, generated_code)?;

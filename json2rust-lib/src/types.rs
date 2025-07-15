@@ -3,6 +3,24 @@ use std::collections::HashMap;
 use thiserror::Error;
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub enum MergeStrategy {
+    Optional,  // Make conflicting fields optional (default)
+    Enum,      // Generate enums for incompatible field groups
+    Hybrid,    // Use enums for field groups, optionals for individual fields
+}
+
+impl From<&str> for MergeStrategy {
+    fn from(s: &str) -> Self {
+        match s {
+            "optional" => MergeStrategy::Optional,
+            "enum" => MergeStrategy::Enum,
+            "hybrid" => MergeStrategy::Hybrid,
+            _ => MergeStrategy::Optional,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct RustStruct {
     pub name: String,
     pub fields: Vec<RustField>,

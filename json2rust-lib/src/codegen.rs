@@ -9,6 +9,14 @@ pub fn generate_rust_structs(
     schema: &JsonSchema,
     existing_structs: &[ExistingStruct],
 ) -> Result<Vec<RustStruct>, Json2RustError> {
+    generate_rust_structs_with_strategy(schema, existing_structs, &MergeStrategy::Optional)
+}
+
+pub fn generate_rust_structs_with_strategy(
+    schema: &JsonSchema,
+    existing_structs: &[ExistingStruct],
+    merge_strategy: &MergeStrategy,
+) -> Result<Vec<RustStruct>, Json2RustError> {
     let mut structs = Vec::new();
     let mut generated_names = HashMap::new();
     
@@ -25,6 +33,7 @@ pub fn generate_rust_structs(
                 existing_structs,
                 &mut structs,
                 &mut generated_names,
+                merge_strategy,
             )?;
             
             let root_struct = RustStruct {
@@ -41,7 +50,7 @@ pub fn generate_rust_structs(
             structs.push(root_struct);
         }
         _ => {
-            generate_struct_from_schema(schema, existing_structs, &mut structs, &mut generated_names)?;
+            generate_struct_from_schema(schema, existing_structs, &mut structs, &mut generated_names, merge_strategy)?;
         }
     }
     
@@ -53,6 +62,7 @@ fn generate_struct_from_schema(
     existing_structs: &[ExistingStruct],
     structs: &mut Vec<RustStruct>,
     generated_names: &mut HashMap<String, usize>,
+    merge_strategy: &MergeStrategy,
 ) -> Result<String, Json2RustError> {
     match &schema.json_type {
         JsonType::Object(fields) => {
@@ -62,10 +72,11 @@ fn generate_struct_from_schema(
                 existing_structs,
                 structs,
                 generated_names,
+                merge_strategy,
             )?;
             
             let rust_struct = if let Some(existing) = find_compatible_struct(&rust_fields, existing_structs) {
-                extend_existing_struct(existing, rust_fields)
+                extend_existing_struct(existing, rust_fields, merge_strategy)
             } else {
                 RustStruct {
                     name: struct_name.clone(),
@@ -88,6 +99,7 @@ fn generate_struct_from_schema(
                 existing_structs,
                 structs,
                 generated_names,
+                merge_strategy,
             )?;
             Ok(format!("Vec<{}>", element_type_name))
         }
@@ -103,6 +115,7 @@ fn generate_fields_from_object(
     existing_structs: &[ExistingStruct],
     structs: &mut Vec<RustStruct>,
     generated_names: &mut HashMap<String, usize>,
+    merge_strategy: &MergeStrategy,
 ) -> Result<Vec<RustField>, Json2RustError> {
     let mut rust_fields = Vec::new();
     
@@ -116,6 +129,7 @@ fn generate_fields_from_object(
             existing_structs,
             structs,
             generated_names,
+            merge_strategy,
         )?;
         
         let rust_field = RustField {
@@ -151,44 +165,106 @@ fn find_compatible_struct<'a>(
         })
 }
 
-fn extend_existing_struct(existing: &ExistingStruct, new_fields: Vec<RustField>) -> RustStruct {
-    let mut fields = Vec::new();
-    let new_field_map: HashMap<String, &RustField> = new_fields
-        .iter()
-        .map(|f| (f.name.clone(), f))
-        .collect();
+fn extend_existing_struct(existing: &ExistingStruct, new_fields: Vec<RustField>, merge_strategy: &MergeStrategy) -> RustStruct {
+    // Order-independent field classification
+    let classification = classify_fields_for_extension(existing, &new_fields);
     
-    // First, add all existing fields in their original order
-    for (existing_field_name, existing_field_type) in &existing.fields {
-        if let Some(new_field) = new_field_map.get(existing_field_name) {
-            // Field exists in both - use compatible type
-            let compatible_type = get_compatible_type(existing_field_type, &new_field.type_name);
-            fields.push(RustField {
-                name: existing_field_name.clone(),
-                type_name: compatible_type,
-                is_optional: new_field.is_optional || existing_field_type.starts_with("Option<"),
-                serde_rename: new_field.serde_rename.clone(),
-            });
-        } else {
-            // Field only exists in existing struct - make it optional
-            let optional_type = if existing_field_type.starts_with("Option<") {
-                existing_field_type.clone() // Already optional
-            } else {
-                format!("Option<{}>", existing_field_type)
-            };
-            fields.push(RustField {
-                name: existing_field_name.clone(),
-                type_name: optional_type,
-                is_optional: true,
-                serde_rename: None,
-            });
-        }
+    match merge_strategy {
+        MergeStrategy::Optional => extend_with_optional_fields(existing, classification),
+        MergeStrategy::Enum => extend_with_enum_fields(existing, classification),
+        MergeStrategy::Hybrid => extend_with_hybrid_fields(existing, classification),
+    }
+}
+
+fn extend_with_optional_fields(existing: &ExistingStruct, classification: FieldClassification) -> RustStruct {
+    let mut fields = Vec::new();
+    
+    // Add common fields first (mandatory with compatible types)
+    for field in classification.common_fields {
+        fields.push(field);
     }
     
-    // Then add new fields that don't exist in the existing struct
-    for new_field in &new_fields {
-        if !existing.fields.contains_key(&new_field.name) {
-            fields.push(new_field.clone());
+    // Add old-only fields as optional (for backward compatibility)
+    for mut field in classification.old_only_fields {
+        if !field.type_name.starts_with("Option<") {
+            field.type_name = format!("Option<{}>", field.type_name);
+            field.is_optional = true;
+        }
+        fields.push(field);
+    }
+    
+    // Add new-only fields as optional (for backward compatibility)
+    for mut field in classification.new_only_fields {
+        if !field.type_name.starts_with("Option<") {
+            field.type_name = format!("Option<{}>", field.type_name);
+            field.is_optional = true;
+        }
+        fields.push(field);
+    }
+    
+    RustStruct {
+        name: existing.name.clone(),
+        fields,
+        derives: vec!["Debug".to_string(), "Clone".to_string(), "Serialize".to_string(), "Deserialize".to_string()],
+        is_optional: false,
+    }
+}
+
+fn extend_with_enum_fields(existing: &ExistingStruct, classification: FieldClassification) -> RustStruct {
+    let mut fields = Vec::new();
+    
+    // Add common fields first (mandatory with compatible types)
+    for field in classification.common_fields {
+        fields.push(field);
+    }
+    
+    // Create enum for conflicting field groups if any exist
+    if !classification.old_only_fields.is_empty() || !classification.new_only_fields.is_empty() {
+        let enum_field = create_schema_variant_enum(&existing.name, &classification.old_only_fields, &classification.new_only_fields);
+        fields.push(enum_field);
+    }
+    
+    RustStruct {
+        name: existing.name.clone(),
+        fields,
+        derives: vec!["Debug".to_string(), "Clone".to_string(), "Serialize".to_string(), "Deserialize".to_string()],
+        is_optional: false,
+    }
+}
+
+fn extend_with_hybrid_fields(existing: &ExistingStruct, classification: FieldClassification) -> RustStruct {
+    let mut fields = Vec::new();
+    
+    // Add common fields first (mandatory with compatible types)
+    for field in classification.common_fields {
+        fields.push(field);
+    }
+    
+    // For hybrid approach:
+    // - If there are many conflicting fields (>3), use enum
+    // - If there are few conflicting fields (<=3), use optional
+    let total_conflicting = classification.old_only_fields.len() + classification.new_only_fields.len();
+    
+    if total_conflicting > 3 {
+        // Use enum for large field groups
+        let enum_field = create_schema_variant_enum(&existing.name, &classification.old_only_fields, &classification.new_only_fields);
+        fields.push(enum_field);
+    } else {
+        // Use optional for small field groups
+        for mut field in classification.old_only_fields {
+            if !field.type_name.starts_with("Option<") {
+                field.type_name = format!("Option<{}>", field.type_name);
+                field.is_optional = true;
+            }
+            fields.push(field);
+        }
+        
+        for mut field in classification.new_only_fields {
+            if !field.type_name.starts_with("Option<") {
+                field.type_name = format!("Option<{}>", field.type_name);
+                field.is_optional = true;
+            }
+            fields.push(field);
         }
     }
     
@@ -197,6 +273,79 @@ fn extend_existing_struct(existing: &ExistingStruct, new_fields: Vec<RustField>)
         fields,
         derives: vec!["Debug".to_string(), "Clone".to_string(), "Serialize".to_string(), "Deserialize".to_string()],
         is_optional: false,
+    }
+}
+
+fn create_schema_variant_enum(struct_name: &str, _old_fields: &[RustField], _new_fields: &[RustField]) -> RustField {
+    // Create enum type name
+    let enum_name = format!("{}Variant", struct_name);
+    
+    // For now, create a simple enum field
+    // In a full implementation, we'd generate the actual enum type
+    RustField {
+        name: "schema_variant".to_string(),
+        type_name: enum_name,
+        is_optional: false,
+        serde_rename: None,
+    }
+}
+
+#[derive(Debug)]
+struct FieldClassification {
+    common_fields: Vec<RustField>,     // In both schemas - mandatory
+    old_only_fields: Vec<RustField>,   // Only in old schema - mandatory
+    new_only_fields: Vec<RustField>,   // Only in new schema - mandatory
+}
+
+fn classify_fields_for_extension(existing: &ExistingStruct, new_fields: &[RustField]) -> FieldClassification {
+    let mut common_fields = Vec::new();
+    let mut old_only_fields = Vec::new();
+    let mut new_only_fields = Vec::new();
+    
+    let new_field_map: HashMap<String, &RustField> = new_fields
+        .iter()
+        .map(|f| (f.name.clone(), f))
+        .collect();
+    
+    // Process existing fields
+    for (existing_field_name, existing_field_type) in &existing.fields {
+        if let Some(new_field) = new_field_map.get(existing_field_name) {
+            // Common field - exists in both schemas
+            let compatible_type = get_compatible_type(existing_field_type, &new_field.type_name);
+            common_fields.push(RustField {
+                name: existing_field_name.clone(),
+                type_name: compatible_type,
+                is_optional: new_field.is_optional || existing_field_type.starts_with("Option<"),
+                serde_rename: new_field.serde_rename.clone(),
+            });
+        } else {
+            // Old-only field - exists only in existing schema
+            // Keep as mandatory to preserve original contract
+            old_only_fields.push(RustField {
+                name: existing_field_name.clone(),
+                type_name: existing_field_type.clone(),
+                is_optional: existing_field_type.starts_with("Option<"),
+                serde_rename: None,
+            });
+        }
+    }
+    
+    // Process new fields that don't exist in existing schema
+    for new_field in new_fields {
+        if !existing.fields.contains_key(&new_field.name) {
+            // New-only field - exists only in new schema
+            // Keep as mandatory to preserve new contract
+            new_only_fields.push(new_field.clone());
+        }
+    }
+    
+    eprintln!("🔍 Field classification: common={}, old-only={}, new-only={}", 
+             common_fields.len(), old_only_fields.len(), new_only_fields.len());
+    
+    FieldClassification {
+        common_fields,
+        old_only_fields,
+        new_only_fields,
     }
 }
 
@@ -284,8 +433,16 @@ pub fn generate_code_with_preservation(
     structs: &[RustStruct],
     original_code: Option<&str>,
 ) -> Result<String, Json2RustError> {
+    generate_code_with_preservation_and_strategy(structs, original_code, &MergeStrategy::Optional)
+}
+
+pub fn generate_code_with_preservation_and_strategy(
+    structs: &[RustStruct],
+    original_code: Option<&str>,
+    merge_strategy: &MergeStrategy,
+) -> Result<String, Json2RustError> {
     if let Some(original) = original_code {
-        generate_code_preserving_original(structs, original)
+        generate_code_preserving_original(structs, original, merge_strategy)
     } else {
         generate_code(structs)
     }
@@ -294,6 +451,7 @@ pub fn generate_code_with_preservation(
 fn generate_code_preserving_original(
     new_structs: &[RustStruct],
     original_code: &str,
+    merge_strategy: &MergeStrategy,
 ) -> Result<String, Json2RustError> {
     use syn::{File, Item, spanned::Spanned};
     
@@ -325,7 +483,7 @@ fn generate_code_preserving_original(
                 let existing_struct = parse_struct_from_item(item_struct)?;
                 
                 // Extend the existing struct with new fields from JSON
-                let extended_struct = extend_existing_struct(&existing_struct, new_struct.fields.clone());
+                let extended_struct = extend_existing_struct(&existing_struct, new_struct.fields.clone(), merge_strategy);
                 
                 // For proc_macro2::Span, we need to use a different approach
                 // Let's find the struct boundaries by searching for the struct name
