@@ -31,9 +31,13 @@ fn convert_json_to_rust_internal(
     } else {
         parse_existing_structs(existing_rust_code)?
     };
+    let merge_strategy = MergeStrategy::Optional;
+    let generated_types = generate_rust_types_with_strategy(&json_schema, &existing_structs, &merge_strategy)?;
+
     
     let rust_structs = generate_rust_structs(&json_schema, &existing_structs)?;
-    let generated_code = generate_code(&rust_structs)?;
+    let generated_code = generate_code_with_types_and_preservation_and_schema(&generated_types, Some(&existing_rust_code), &merge_strategy, Some(&json_schema))?;
+
     
     Ok(generated_code)
 }
