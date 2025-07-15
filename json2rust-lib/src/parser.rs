@@ -40,7 +40,27 @@ fn extract_type_string(ty: &Type) -> Result<String, Json2RustError> {
     match ty {
         Type::Path(TypePath { path, .. }) => {
             let segments: Vec<String> = path.segments.iter()
-                .map(|seg| seg.ident.to_string())
+                .map(|seg| {
+                    let ident = seg.ident.to_string();
+                    if let syn::PathArguments::AngleBracketed(args) = &seg.arguments {
+                        let arg_strings: Vec<String> = args.args.iter()
+                            .filter_map(|arg| {
+                                if let syn::GenericArgument::Type(ty) = arg {
+                                    extract_type_string(ty).ok()
+                                } else {
+                                    None
+                                }
+                            })
+                            .collect();
+                        if !arg_strings.is_empty() {
+                            format!("{}<{}>", ident, arg_strings.join(", "))
+                        } else {
+                            ident
+                        }
+                    } else {
+                        ident
+                    }
+                })
                 .collect();
             Ok(segments.join("::"))
         }
@@ -77,7 +97,13 @@ pub fn calculate_struct_similarity(existing: &ExistingStruct, new_fields: &HashM
         0.0
     };
     
-    (field_overlap + type_compatibility) / 2.0
+    let similarity = (field_overlap + type_compatibility) / 2.0;
+    
+    // Debug output for developers to understand similarity calculations
+    eprintln!("🔍 Similarity calculation for '{}': common_fields={}, total_fields={}, field_overlap={:.2}, type_compatibility={:.2}, similarity={:.2}", 
+             existing.name, common_fields, total_fields, field_overlap, type_compatibility, similarity);
+    
+    similarity
 }
 
 fn are_types_compatible(existing_type: &str, new_type: &str) -> bool {
@@ -90,12 +116,21 @@ fn are_types_compatible(existing_type: &str, new_type: &str) -> bool {
     
     if existing_optional && !new_optional {
         let inner_existing = extract_option_inner(existing_type);
-        return inner_existing == new_type;
+        return are_types_compatible(inner_existing, new_type);
     }
     
     if !existing_optional && new_optional {
         let inner_new = extract_option_inner(new_type);
-        return existing_type == inner_new;
+        return are_types_compatible(existing_type, inner_new);
+    }
+    
+    // Check numeric type compatibility
+    if is_numeric_type(existing_type) && new_type == "f64" {
+        return true;
+    }
+    
+    if is_numeric_type(new_type) && existing_type == "f64" {
+        return true;
     }
     
     match (existing_type, new_type) {
@@ -104,6 +139,12 @@ fn are_types_compatible(existing_type: &str, new_type: &str) -> bool {
         ("i64", "f64") | ("f64", "i64") => true,
         _ => false,
     }
+}
+
+fn is_numeric_type(type_name: &str) -> bool {
+    matches!(type_name, "i8" | "i16" | "i32" | "i64" | "i128" | "isize" | 
+                        "u8" | "u16" | "u32" | "u64" | "u128" | "usize" | 
+                        "f32" | "f64")
 }
 
 fn extract_option_inner(option_type: &str) -> &str {

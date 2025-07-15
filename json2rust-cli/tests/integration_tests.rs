@@ -38,8 +38,8 @@ fn test_json_array() {
     let stdout = String::from_utf8(output.stdout).expect("Invalid UTF-8");
     
     assert!(stdout.contains("pub struct Users"));
-    assert!(stdout.contains("pub items: Vec<UsersItem>"));
-    assert!(stdout.contains("pub struct UsersItem"));
+    assert!(stdout.contains("pub items: Vec<User>"));
+    assert!(stdout.contains("pub struct User"));
     assert!(stdout.contains("pub id: f64"));
     assert!(stdout.contains("pub name: String"));
 }
@@ -97,7 +97,7 @@ fn test_with_existing_struct() {
     
     assert!(stdout.contains("pub struct Person"));
     assert!(stdout.contains("pub name: String"));
-    assert!(stdout.contains("pub age: f64"));
+    assert!(stdout.contains("pub age: i32"));
     assert!(stdout.contains("pub email: String"));
 }
 

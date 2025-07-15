@@ -3,7 +3,7 @@ use crate::analyzer::{to_pascal_case, to_snake_case};
 use crate::parser::calculate_struct_similarity;
 use std::collections::HashMap;
 
-const SIMILARITY_THRESHOLD: f64 = 0.7;
+const SIMILARITY_THRESHOLD: f64 = 0.6;
 
 pub fn generate_rust_structs(
     schema: &JsonSchema,
@@ -14,9 +14,11 @@ pub fn generate_rust_structs(
     
     match &schema.json_type {
         JsonType::Array(element_type) => {
+            // For arrays, try to find existing struct with singular name first
+            let element_name = get_singular_name(&schema.name);
             let element_type_name = generate_struct_from_schema(
                 &JsonSchema {
-                    name: format!("{}Item", schema.name),
+                    name: element_name,
                     json_type: (**element_type).clone(),
                     optional: false,
                 },
@@ -150,16 +152,43 @@ fn find_compatible_struct<'a>(
 }
 
 fn extend_existing_struct(existing: &ExistingStruct, new_fields: Vec<RustField>) -> RustStruct {
-    let mut fields = new_fields;
+    let mut fields = Vec::new();
+    let new_field_map: HashMap<String, &RustField> = new_fields
+        .iter()
+        .map(|f| (f.name.clone(), f))
+        .collect();
     
+    // First, add all existing fields in their original order
     for (existing_field_name, existing_field_type) in &existing.fields {
-        if !fields.iter().any(|f| f.name == *existing_field_name) {
+        if let Some(new_field) = new_field_map.get(existing_field_name) {
+            // Field exists in both - use compatible type
+            let compatible_type = get_compatible_type(existing_field_type, &new_field.type_name);
             fields.push(RustField {
                 name: existing_field_name.clone(),
-                type_name: format!("Option<{}>", existing_field_type),
+                type_name: compatible_type,
+                is_optional: new_field.is_optional || existing_field_type.starts_with("Option<"),
+                serde_rename: new_field.serde_rename.clone(),
+            });
+        } else {
+            // Field only exists in existing struct - make it optional
+            let optional_type = if existing_field_type.starts_with("Option<") {
+                existing_field_type.clone() // Already optional
+            } else {
+                format!("Option<{}>", existing_field_type)
+            };
+            fields.push(RustField {
+                name: existing_field_name.clone(),
+                type_name: optional_type,
                 is_optional: true,
                 serde_rename: None,
             });
+        }
+    }
+    
+    // Then add new fields that don't exist in the existing struct
+    for new_field in &new_fields {
+        if !existing.fields.contains_key(&new_field.name) {
+            fields.push(new_field.clone());
         }
     }
     
@@ -168,6 +197,62 @@ fn extend_existing_struct(existing: &ExistingStruct, new_fields: Vec<RustField>)
         fields,
         derives: vec!["Debug".to_string(), "Clone".to_string(), "Serialize".to_string(), "Deserialize".to_string()],
         is_optional: false,
+    }
+}
+
+fn get_compatible_type(existing_type: &str, new_type: &str) -> String {
+    // If types are identical, use existing type
+    if existing_type == new_type {
+        return existing_type.to_string();
+    }
+    
+    // Handle numeric type compatibility
+    if is_numeric_type(existing_type) && new_type == "f64" {
+        return existing_type.to_string(); // Prefer existing numeric type
+    }
+    
+    // Handle Option types - if existing is Option<T> and new is T, keep as Option<T>
+    if existing_type.starts_with("Option<") && !new_type.starts_with("Option<") {
+        let inner_existing = extract_option_inner(existing_type);
+        if inner_existing == new_type || (is_numeric_type(inner_existing) && new_type == "f64") {
+            return existing_type.to_string(); // Keep existing Optional type
+        }
+    }
+    
+    if !existing_type.starts_with("Option<") && new_type.starts_with("Option<") {
+        let inner_new = extract_option_inner(new_type);
+        if existing_type == inner_new || (is_numeric_type(existing_type) && inner_new == "f64") {
+            return new_type.to_string();
+        }
+    }
+    
+    // Default to new type if no compatibility found
+    new_type.to_string()
+}
+
+fn is_numeric_type(type_name: &str) -> bool {
+    matches!(type_name, "i8" | "i16" | "i32" | "i64" | "i128" | "isize" | 
+                        "u8" | "u16" | "u32" | "u64" | "u128" | "usize" | 
+                        "f32" | "f64")
+}
+
+fn extract_option_inner(option_type: &str) -> &str {
+    if option_type.starts_with("Option<") && option_type.ends_with('>') {
+        &option_type[7..option_type.len()-1]
+    } else {
+        option_type
+    }
+}
+
+fn get_singular_name(plural_name: &str) -> String {
+    // Simple pluralization rules - can be enhanced
+    if plural_name.ends_with("ies") {
+        format!("{}y", &plural_name[..plural_name.len()-3])
+    } else if plural_name.ends_with("s") && !plural_name.ends_with("ss") {
+        plural_name[..plural_name.len()-1].to_string()
+    } else {
+        // If no clear plural pattern, use "Item" suffix
+        format!("{}Item", plural_name)
     }
 }
 
