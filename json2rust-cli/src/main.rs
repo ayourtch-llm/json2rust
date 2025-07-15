@@ -51,18 +51,19 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         buffer
     };
 
-    let existing_structs = if let Some(existing_file) = matches.get_one::<String>("existing") {
+    let (existing_structs, existing_code) = if let Some(existing_file) = matches.get_one::<String>("existing") {
         let existing_code = fs::read_to_string(existing_file)?;
-        parse_existing_structs(&existing_code)?
+        let existing_structs = parse_existing_structs(&existing_code)?;
+        (existing_structs, Some(existing_code))
     } else {
-        Vec::new()
+        (Vec::new(), None)
     };
 
     let struct_name = matches.get_one::<String>("struct-name").unwrap();
     
     let json_schema = analyze_json(&input_json, struct_name)?;
     let rust_structs = generate_rust_structs(&json_schema, &existing_structs)?;
-    let generated_code = generate_code(&rust_structs)?;
+    let generated_code = generate_code_with_preservation(&rust_structs, existing_code.as_deref())?;
 
     if let Some(output_file) = matches.get_one::<String>("output") {
         fs::write(output_file, generated_code)?;

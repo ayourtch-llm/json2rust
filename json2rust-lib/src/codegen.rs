@@ -280,6 +280,109 @@ pub fn generate_code(structs: &[RustStruct]) -> Result<String, Json2RustError> {
     Ok(code)
 }
 
+pub fn generate_code_with_preservation(
+    structs: &[RustStruct],
+    original_code: Option<&str>,
+) -> Result<String, Json2RustError> {
+    if let Some(original) = original_code {
+        generate_code_preserving_original(structs, original)
+    } else {
+        generate_code(structs)
+    }
+}
+
+fn generate_code_preserving_original(
+    new_structs: &[RustStruct],
+    original_code: &str,
+) -> Result<String, Json2RustError> {
+    use syn::{File, Item};
+    
+    let ast: File = syn::parse_str(original_code)
+        .map_err(|e| Json2RustError::RustParsing(format!("Failed to parse original code: {}", e)))?;
+    
+    // Create a map of new structs by name for quick lookup
+    let new_struct_map: std::collections::HashMap<String, &RustStruct> = new_structs
+        .iter()
+        .map(|s| (s.name.clone(), s))
+        .collect();
+    
+    let mut result = String::new();
+    
+    // Extract imports and other non-struct items first
+    let mut imports = Vec::new();
+    let mut other_items = Vec::new();
+    let mut original_structs = Vec::new();
+    
+    for item in &ast.items {
+        match item {
+            Item::Use(_) => imports.push(item),
+            Item::Struct(item_struct) => {
+                let struct_name = item_struct.ident.to_string();
+                if new_struct_map.contains_key(&struct_name) {
+                    // This struct will be replaced
+                    eprintln!("🔄 Replaced struct '{}' with extended version", struct_name);
+                } else {
+                    // This struct will be preserved
+                    original_structs.push(item_struct);
+                }
+            }
+            _ => other_items.push(item),
+        }
+    }
+    
+    // Generate the result by preserving structure
+    for import in &imports {
+        result.push_str(&quote::quote!(#import).to_string());
+        result.push('\n');
+    }
+    
+    if !imports.is_empty() {
+        result.push('\n');
+    }
+    
+    // Add preserved structs
+    for original_struct in &original_structs {
+        result.push_str(&quote::quote!(#original_struct).to_string());
+        result.push('\n');
+    }
+    
+    // Add replaced structs
+    for new_struct in new_structs {
+        if struct_exists_in_original(&ast, &new_struct.name) {
+            result.push_str(&generate_struct_code(new_struct)?);
+            result.push('\n');
+        }
+    }
+    
+    // Add other items
+    for item in &other_items {
+        result.push_str(&quote::quote!(#item).to_string());
+        result.push('\n');
+    }
+    
+    // Add completely new structs that weren't in the original file
+    for new_struct in new_structs {
+        if !struct_exists_in_original(&ast, &new_struct.name) {
+            result.push_str(&generate_struct_code(new_struct)?);
+            result.push('\n');
+            eprintln!("✨ Added new struct '{}'", new_struct.name);
+        }
+    }
+    
+    Ok(result)
+}
+
+fn struct_exists_in_original(ast: &syn::File, name: &str) -> bool {
+    ast.items.iter().any(|item| {
+        if let syn::Item::Struct(item_struct) = item {
+            item_struct.ident.to_string() == name
+        } else {
+            false
+        }
+    })
+}
+
+
 fn generate_struct_code(rust_struct: &RustStruct) -> Result<String, Json2RustError> {
     let mut code = String::new();
     
