@@ -79,6 +79,12 @@
             border-radius: 5px;
             font-size: 14px;
         }
+        select {
+            padding: 8px 12px;
+            border: 2px solid #ddd;
+            border-radius: 5px;
+            font-size: 14px;
+        }
         
         button {
             background-color: #4CAF50;
@@ -172,6 +178,11 @@
             <div class="controls">
                 <label for="struct-name">Root Struct Name:</label>
                 <input type="text" id="struct-name" value="RootStruct" placeholder="Enter struct name">
+                <select id="merge-strategy">
+                <option value="optional" selected>Make the non-ovelapping fields optional</option>
+                <option value="enum">Attempt to use enum to enforce the type invariants</option>
+                <option value="hybrid">Attempt to decide which of the two strategies to use, automatically<option>
+                </select>
                 <button id="convert-btn">Convert</button>
             </div>
             
@@ -251,6 +262,7 @@
             const jsonInput = document.getElementById('json-input').value.trim();
             const existingRust = document.getElementById('existing-rust').value.trim();
             const structName = document.getElementById('struct-name').value.trim() || 'RootStruct';
+            const mergeStrategy = document.getElementById('merge-strategy').value.trim() || 'optional';
             
             if (!jsonInput) {
                 showError('Please enter JSON input');
@@ -263,7 +275,7 @@
             }
             
             try {
-                const result = convert_json_to_rust(jsonInput, existingRust, structName);
+                const result = convert_json_to_rust(jsonInput, existingRust, structName, mergeStrategy);
                 
                 if (result.startsWith('Error:')) {
                     showError(result);

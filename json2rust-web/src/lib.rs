@@ -12,8 +12,8 @@ macro_rules! console_log {
 }
 
 #[wasm_bindgen]
-pub fn convert_json_to_rust(json_input: &str, existing_rust_code: &str, struct_name: &str) -> String {
-    match convert_json_to_rust_internal(json_input, existing_rust_code, struct_name) {
+pub fn convert_json_to_rust(json_input: &str, existing_rust_code: &str, struct_name: &str, merge_strategy: &str) -> String {
+    match convert_json_to_rust_internal(json_input, existing_rust_code, struct_name, merge_strategy) {
         Ok(result) => result,
         Err(e) => format!("Error: {}", e),
     }
@@ -23,6 +23,7 @@ fn convert_json_to_rust_internal(
     json_input: &str,
     existing_rust_code: &str,
     struct_name: &str,
+    strategy: &str
 ) -> Result<String, Box<dyn std::error::Error>> {
     let json_schema = analyze_json(json_input, struct_name)?;
     
@@ -31,7 +32,7 @@ fn convert_json_to_rust_internal(
     } else {
         parse_existing_structs(existing_rust_code)?
     };
-    let merge_strategy = MergeStrategy::Optional;
+    let merge_strategy: MergeStrategy = strategy.into();
     let generated_types = generate_rust_types_with_strategy(&json_schema, &existing_structs, &merge_strategy)?;
 
     
@@ -51,8 +52,8 @@ pub fn validate_json(json_input: &str) -> bool {
 }
 
 #[wasm_bindgen]
-pub fn get_error_message(json_input: &str, existing_rust_code: &str, struct_name: &str) -> String {
-    match convert_json_to_rust_internal(json_input, existing_rust_code, struct_name) {
+pub fn get_error_message(json_input: &str, existing_rust_code: &str, struct_name: &str, merge_strategy: &str) -> String {
+    match convert_json_to_rust_internal(json_input, existing_rust_code, struct_name, merge_strategy) {
         Ok(_) => String::new(),
         Err(e) => e.to_string(),
     }
