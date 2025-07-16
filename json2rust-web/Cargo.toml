@@ -8,6 +8,7 @@ crate-type = ["cdylib"]
 
 [dependencies]
 json2rust-lib = { path = "../json2rust-lib" }
+json2rust-evolution = { path = "../json2rust-evolution" }
 wasm-bindgen = { workspace = true }
 js-sys = { workspace = true }
 serde = { workspace = true }

@@ -2,7 +2,7 @@
 members = [
     "json2rust-cli",
     "json2rust-lib",
-    "json2rust-web", "test_compat",
+    "json2rust-web", "json2rust-evolution"
 ]
 resolver = "2"
 
